@@ -253,24 +253,39 @@ export function splitCards(html: string): string[] {
     const end = starts[i + 1] ?? html.length
     const chunk = html.slice(starts[i]!, end)
     // The closing </nfj-postings-item> tag also matches the marker; only chunks
-    // that actually carry an offer link are cards.
-    if (/href="\/job\//.test(chunk)) chunks.push(chunk)
+    // that actually carry an offer link are cards. The portal sometimes prefixes
+    // the link with a locale segment (e.g. "/pl/job/..." instead of "/job/...").
+    if (/href="\/(?:[a-z]{2}\/)?job\//.test(chunk)) chunks.push(chunk)
   }
   return chunks
 }
 
 export function parseCard(chunk: string): JobCard | null {
-  const slug = /href="\/job\/([^"]+)"/.exec(chunk)?.[1] ?? null
+  const slug = /href="\/(?:[a-z]{2}\/)?job\/([^"]+)"/.exec(chunk)?.[1] ?? null
   const title = textAfterDataCy(chunk, "title position on the job offer listing")
   if (!slug || !title) return null
 
-  const company = innerText(chunk, /<h4[^>]*class="company-name[^"]*"[^>]*>/i, "</h4>")
-  const locationRaw = innerText(
-    chunk,
-    /<nfj-posting-item-city[^>]*data-cy="location on the job offer listing"[^>]*>/i,
-    "</nfj-posting-item-city>",
-  )
-  const salaryBlock = /<nfj-posting-item-salary[\s\S]*?<\/nfj-posting-item-salary>/.exec(chunk)?.[0] ?? null
+  // Company and salary used to sit inside dedicated custom tags
+  // (<nfj-posting-item-city>, <nfj-posting-item-salary>); the portal has since
+  // flattened those to plain <span>s, so the old tag-anchored patterns are tried
+  // first (in case of a partial rollout) and the new plain-span ones as fallback.
+  const company =
+    innerText(chunk, /<h4[^>]*class="company-name[^"]*"[^>]*>/i, "</h4>") ??
+    /commonicon="job_offer"[\s\S]{0,400}?<span class="tw-truncate">([^<]*)<\/span>/
+      .exec(chunk)?.[1]
+      ?.trim() ??
+    null
+  const locationRaw =
+    innerText(
+      chunk,
+      /<nfj-posting-item-city[^>]*data-cy="location on the job offer listing"[^>]*>/i,
+      "</nfj-posting-item-city>",
+    ) ?? textAfterDataCy(chunk, "location on the job offer listing")
+  const contractType = textAfterDataCy(chunk, "contract type on the job offer listing")
+  const salaryBlock =
+    /<nfj-posting-item-salary[\s\S]*?<\/nfj-posting-item-salary>/.exec(chunk)?.[0] ??
+    /<span data-cy="salary ranges on the job offer listing"[^>]*>([\s\S]*?)<\/span>/.exec(chunk)?.[1] ??
+    null
 
   // "Warszawa +1" means the same posting is also open in one other city.
   const extraMatch = locationRaw ? /\+\s*(\d+)\s*$/.exec(locationRaw) : null
@@ -285,7 +300,12 @@ export function parseCard(chunk: string): JobCard | null {
     // from each posting's detail page. Null here means "not fetched", never "old".
     date: null,
     url: `${BASE}${DETAIL_PATH}/${slug}`,
-    salary: parseSalaryText(salaryBlock ? stripHtml(salaryBlock) : null),
+    // The contract-type badge ("B2B" / "UoP") sits in its own span now rather
+    // than inline with the salary text; parseSalaryText still expects it in
+    // parens, so it's reattached here.
+    salary: parseSalaryText(
+      salaryBlock ? `${stripHtml(salaryBlock)}${contractType ? ` (${contractType})` : ""}` : null,
+    ),
     tags: allTextAfterDataCy(chunk, "category name on the job offer listing"),
     extraLocations: extraMatch ? parseInt(extraMatch[1]!, 10) : 0,
   }
